@@ -24,6 +24,7 @@ Notes on the free-model variance issue:
 import os
 import sys
 import time
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -43,28 +44,27 @@ _judge_llm = ChatOpenAI(
 DATASET_NAME = "pdf-chatbot-eval-v1"
 DOCS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs")
 
-_loaded_docs = set()
 
+def run_bot(inputs: dict) -> dict:
+    """
+    Wrapper matching the signature evaluate() expects: inputs -> outputs dict.
 
-def _ensure_doc_loaded(doc_name: str, thread_id: str):
-    """Load the sample PDF into the retriever for this thread if not already done."""
-    key = (doc_name, thread_id)
-    if key in _loaded_docs:
-        return
+    IMPORTANT: each call gets its OWN unique thread_id. Backend.py persists
+    conversation history per thread_id (SQLite checkpointer), so reusing one
+    thread_id across multiple questions makes each question's prompt include
+    every earlier Q&A for that doc -- the free model then sometimes answers
+    a PREVIOUS question instead of the current one. A fresh thread per call
+    keeps each question fully isolated (at the cost of re-embedding the PDF
+    each time, which is fine for this small 2-doc eval set).
+    """
+    doc_name = inputs["doc"]
+    question = inputs["question"]
+    thread_id = f"eval-{doc_name}-{uuid.uuid4().hex[:8]}"
+
     path = os.path.join(DOCS_DIR, doc_name)
     with open(path, "rb") as f:
         pdf_bytes = f.read()
     retreiver_doc(pdf_bytes, thread_id=thread_id, filename=doc_name)
-    _loaded_docs.add(key)
-
-
-def run_bot(inputs: dict) -> dict:
-    """Wrapper matching the signature evaluate() expects: inputs -> outputs dict."""
-    doc_name = inputs["doc"]
-    question = inputs["question"]
-    thread_id = f"eval-{doc_name}"
-
-    _ensure_doc_loaded(doc_name, thread_id)
 
     last_err = None
     for attempt in range(3):
@@ -115,7 +115,8 @@ if __name__ == "__main__":
         data=DATASET_NAME,
         evaluators=[correctness],
         experiment_prefix="rag-openrouter-free",
-        num_repetitions=3,
+        num_repetitions=1,  # lowered from 3 to conserve OpenRouter's daily free quota;
+                            # raise back to 3 once you have more headroom
         metadata={"model": "openrouter/free", "pipeline": "langgraph-rag"},
     )
     print("Eval run complete. View the scored experiment in the LangSmith UI "
